@@ -344,7 +344,7 @@ def main():
         "data/validation", device, use_patches=False, resize_to=(384, 384)
     )
     train_dataloader = torch.utils.data.DataLoader(
-        train_dataset, batch_size=8, shuffle=True
+        train_dataset, batch_size=4, shuffle=True
     )
     val_dataloader = torch.utils.data.DataLoader(
         val_dataset, batch_size=8, shuffle=True
