@@ -347,7 +347,7 @@ def main():
         train_dataset, batch_size=4, shuffle=True
     )
     val_dataloader = torch.utils.data.DataLoader(
-        val_dataset, batch_size=8, shuffle=True
+        val_dataset, batch_size=4, shuffle=True
     )
     model = U_Transformer(3, 1, True).to(device)
     loss_fn = nn.BCELoss()
