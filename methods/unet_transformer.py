@@ -7,8 +7,8 @@ import numpy as np
 from common.read_data import *
 from common.util import np_to_tensor, accuracy_fn
 from common.image_data_set import ImageDataSet
-from unet import patch_accuracy_fn
-from conv_neural_networks import train
+from methods.unet import patch_accuracy_fn
+from methods.conv_neural_networks import train
 
 
 class DoubleConv(nn.Module):
