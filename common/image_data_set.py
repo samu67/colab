@@ -7,7 +7,7 @@ from common.read_data import *
 class ImageDataSet(torch.utils.data.Dataset):
     # dataset class that deals with loading the data and making it available by index
 
-    def __init__(self, path, device, use_patches=True, resize_to=(400, 400)):
+    def __init__(self, path, device, use_patches=True, resize_to=(192, 192)):
         self.path = path
 
         self.device = device
