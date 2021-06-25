@@ -3,16 +3,14 @@ from torch import nn
 import torch.nn.functional as F
 import math
 import numpy as np
-import gc
-
 
 from common.read_data import *
 from common.util import np_to_tensor, accuracy_fn
 from common.image_data_set import ImageDataSet
+from unet import patch_accuracy_fn
 from conv_neural_networks import train
 
-gc.enable()
-gc.collect()
+
 class DoubleConv(nn.Module):
     """(convolution => [BN] => ReLU) * 2"""
     def __init__(self, in_channels, out_channels, mid_channels=None):
@@ -68,12 +66,12 @@ class Up(nn.Module):
     def forward(self, x1, x2):
         x1 = self.up(x1)
         # input is CHW
-        #diffY = (x2.size()[2] - x1.size()[2])
-        #diffX = (x2.size()[3] - x1.size()[3])
+        diffY = x2.size()[2] - x1.size()[2]
+        diffX = x2.size()[3] - x1.size()[3]
 
         x1 = F.pad(
             x1,
-            [(x2.size()[3] - x1.size()[3]) // 2, (x2.size()[3] - x1.size()[3]) - (x2.size()[3] - x1.size()[3]) // 2, (x2.size()[2] - x1.size()[2]) // 2, (x2.size()[2] - x1.size()[2]) - (x2.size()[2] - x1.size()[2]) // 2])
+            [diffX // 2, diffX - diffX // 2, diffY // 2, diffY - diffY // 2])
         # if you have padding issues, see
         # https://github.com/HaiyongJiang/U-Net-Pytorch-Unstructured-Buggy/commit/0e854509c2cea854e247a9c615f175f76fbb2e3a
         # https://github.com/xiaopeng-liao/Pytorch-UNet/commit/8ebac70e633bac59fc22bb5195e513d5832fb3bd
@@ -183,12 +181,13 @@ class PositionalEncoding2D(nn.Module):
                              device=tensor.device).type(self.inv_freq.type())
         sin_inp_x = torch.einsum("i,j->ij", pos_x, self.inv_freq)
         sin_inp_y = torch.einsum("i,j->ij", pos_y, self.inv_freq)
-        #emb_x = torch.cat((sin_inp_x.sin(), sin_inp_x.cos()),dim=-1).unsqueeze(1)
-        #emb_y = torch.cat((sin_inp_y.sin(), sin_inp_y.cos()), dim=-1)
-        emb = torch.zeros((x, y, self.channels * 2), device=tensor.device).type(tensor.type())
-        emb[:, :, :self.channels] = torch.cat((sin_inp_x.sin(), sin_inp_x.cos()), dim=-1).unsqueeze(1)
-        #
-        emb[:, :, self.channels:2 * self.channels] = torch.cat((sin_inp_y.sin(), sin_inp_y.cos()), dim=-1)
+        emb_x = torch.cat((sin_inp_x.sin(), sin_inp_x.cos()),
+                          dim=-1).unsqueeze(1)
+        emb_y = torch.cat((sin_inp_y.sin(), sin_inp_y.cos()), dim=-1)
+        emb = torch.zeros((x, y, self.channels * 2),
+                          device=tensor.device).type(tensor.type())
+        emb[:, :, :self.channels] = emb_x
+        emb[:, :, self.channels:2 * self.channels] = emb_y
 
         return emb[None, :, :, :orig_ch].repeat(batch_size, 1, 1, 1)
 
@@ -202,9 +201,9 @@ class PositionalEncodingPermute2D(nn.Module):
         self.penc = PositionalEncoding2D(channels)
 
     def forward(self, tensor):
-        #tensor = tensor.permute(0, 2, 3, 1)
-        #enc = self.penc(tensor.permute(0, 2, 3, 1))
-        return self.penc(tensor.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
+        tensor = tensor.permute(0, 2, 3, 1)
+        enc = self.penc(tensor)
+        return enc.permute(0, 3, 1, 2)
 
 
 class MultiHeadSelfAttention(MultiHeadAttention):
@@ -222,11 +221,12 @@ class MultiHeadSelfAttention(MultiHeadAttention):
         pe = self.pe(x)
         x = x + pe
         x = x.reshape(b, c, h * w).permute(0, 2, 1)  #[b, h*w, d]
-        #Q = self.query(x)
-        #K = self.key(x)
-        #A = self.softmax(torch.bmm(Q, K.permute(0, 2, 1)) / math.sqrt(c))  #[b, h*w, h*w]
-        #V = self.value(x)
-        x = torch.bmm(self.softmax(torch.bmm(self.query(x), self.key(x).permute(0, 2, 1)) / math.sqrt(c)), self.value(x)).permute(0, 2, 1).reshape(b, c, h, w)
+        Q = self.query(x)
+        K = self.key(x)
+        A = self.softmax(torch.bmm(Q, K.permute(0, 2, 1)) /
+                         math.sqrt(c))  #[b, h*w, h*w]
+        V = self.value(x)
+        x = torch.bmm(A, V).permute(0, 2, 1).reshape(b, c, h, w)
         return x
 
 
@@ -260,21 +260,21 @@ class MultiHeadCrossAttention(MultiHeadAttention):
         Yb, Yc, Yh, Yw = Y.size()
         # Spe = self.positional_encoding_2d(Sc, Sh, Sw)
         Spe = self.Spe(S)
-        #S = S + self.Spe(S)
-        #S1 = self.Sconv(S).reshape(Yb, Sc, Yh * Yw).permute(0, 2, 1)
-        #V = self.value(S1)
+        S = S + Spe
+        S1 = self.Sconv(S).reshape(Yb, Sc, Yh * Yw).permute(0, 2, 1)
+        V = self.value(S1)
         # Ype = self.positional_encoding_2d(Yc, Yh, Yw)
-        #Ype = self.Ype(Y)
-        #Y = Y + Ype
-        #Y1 = self.Yconv(Y).reshape(Yb, Sc, Yh * Yw).permute(0, 2, 1)
-        #Y2 = self.Yconv2(Y)
-        #Q = self.query(Y1)
-        #K = self.key(Y1)
-        #A = self.softmax(torch.bmm(Q, K.permute(0, 2, 1)) / math.sqrt(Sc))
-        #x = torch.bmm(A, V).permute(0, 2, 1).reshape(Yb, Sc, Yh, Yw)
-        #Z = self.conv(x)
-        #Z = Z * S
-        Z = torch.cat([self.conv(torch.bmm(self.softmax(torch.bmm(self.query(self.Yconv(Y + self.Ype(Y)).reshape(Yb, Sc, Yh * Yw).permute(0, 2, 1)), self.key(self.Yconv(Y + self.Ype(Y)).reshape(Yb, Sc, Yh * Yw).permute(0, 2, 1)).permute(0, 2, 1)) / math.sqrt(Sc)), self.value(self.Sconv(S).reshape(Yb, Sc, Yh * Yw).permute(0, 2, 1))).permute(0, 2, 1).reshape(Yb, Sc, Yh, Yw)) * S, self.Yconv2(Y + self.Ype(Y))], dim=1)
+        Ype = self.Ype(Y)
+        Y = Y + Ype
+        Y1 = self.Yconv(Y).reshape(Yb, Sc, Yh * Yw).permute(0, 2, 1)
+        Y2 = self.Yconv2(Y)
+        Q = self.query(Y1)
+        K = self.key(Y1)
+        A = self.softmax(torch.bmm(Q, K.permute(0, 2, 1)) / math.sqrt(Sc))
+        x = torch.bmm(A, V).permute(0, 2, 1).reshape(Yb, Sc, Yh, Yw)
+        Z = self.conv(x)
+        Z = Z * S
+        Z = torch.cat([Z, Y2], dim=1)
         return Z
 
 
@@ -325,33 +325,16 @@ class U_Transformer(nn.Module):
         x1 = self.inc(x)
         x2 = self.down1(x1)
         x3 = self.down2(x2)
-        #x4 = self.down3(x3)
-        x4 = self.MHSA(self.down3(self.down2(x2)))
-        #x = self.up1(x4, x3)
-        #x = self.up2(x, x2)
-        #x = self.up3(x, x1)
-        logits = self.outc(self.up3(self.up2(self.up1(x4, x3), x2), x1))
+        x4 = self.down3(x3)
+        x4 = self.MHSA(x4)
+        x = self.up1(x4, x3)
+        x = self.up2(x, x2)
+        x = self.up3(x, x1)
+        logits = self.outc(x)
         return logits
 
 
-def patch_accuracy_fn(y_hat, y):
-    # computes accuaracy weighted by patches (metricused on Kaggle for evaluation)
-    h_patches = y.shape[-2] // PATCH_SIZE
-    w_patches = y.shape[-1] // PATCH_SIZE
-    patches_hat = (
-        y_hat.reshape(-1, 1, h_patches, PATCH_SIZE, w_patches, PATCH_SIZE).mean(
-            (-1, -3)
-        )
-        < CUTOFF
-    )
-    patches = (
-        y.reshape(-1, 1, h_patches, PATCH_SIZE, w_patches, PATCH_SIZE).mean((-1, -3))
-        < CUTOFF
-    )
-    return (patches == patches_hat).float().mean()
-
-
-def main():
+if __name__ == "__main__":
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     train_dataset = ImageDataSet(
@@ -361,12 +344,12 @@ def main():
         "data/validation", device, use_patches=False, resize_to=(384, 384)
     )
     train_dataloader = torch.utils.data.DataLoader(
-        train_dataset, batch_size=4, shuffle=True
+        train_dataset, batch_size=8, shuffle=True
     )
     val_dataloader = torch.utils.data.DataLoader(
-        val_dataset, batch_size=4, shuffle=True
+        val_dataset, batch_size=8, shuffle=True
     )
-    model = U_Transformer(in_channels=3, classes=1).to(device)
+    model = U_Transformer(3, 1, True).to(device)
     loss_fn = nn.BCELoss()
     metric_fns = {"acc": accuracy_fn, "patch_acc": patch_accuracy_fn}
     optimizer = torch.optim.Adam(model.parameters())
@@ -409,5 +392,7 @@ def main():
     test_pred = np.round(np.mean(test_pred, (-1, -2)) > CUTOFF)
 
     create_submission(
-        test_pred, test_filenames, submission_filename="data/submissions/unet_submission.csv"
+        test_pred,
+        test_filenames,
+        submission_filename="data/submissions/unet_transformer_submission.csv",
     )
